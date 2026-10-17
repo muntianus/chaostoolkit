@@ -1,0 +1,23 @@
+{
+  "name": "@perfops/chaostoolkit",
+  "version": "1.0.0",
+  "description": "PerfOps Chaos Engineering Experiment Runner, Steady-State Verifier & Resilience API Service",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/chaos.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "chaos-engineering",
+    "chaostoolkit",
+    "resilience",
+    "perfops",
+    "launchgate",
+    "globex"
+  ],
+  "license": "MIT"
+}

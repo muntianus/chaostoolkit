@@ -1,0 +1,137 @@
+{
+  "version": "1.0.0",
+  "id": "globex-api-degradation",
+  "title": "Globex API Upstream Degradation & DB Pool Saturation Resilience",
+  "description": "Verifies steady-state health and graceful fallback resilience of globlex.pro and api.globlex.pro under simulated +250ms CBR/DaData upstream latency timeout and PostgreSQL connection pool saturation.",
+  "tags": ["globex", "api.globlex.pro", "latency", "db-pool", "fallback", "launchgate-core"],
+  "configuration": {
+    "target_service": "api.globlex.pro",
+    "frontend_domain": "globlex.pro",
+    "upstream_dependencies": ["cbr-rates-provider", "dadata-inn-lookup"],
+    "injected_latency_ms": 250,
+    "db_pool_saturation_pct": 92,
+    "slo_p95_budget_ms": 450,
+    "mttr_budget_ms": 1800
+  },
+  "steady-state-hypothesis": {
+    "title": "Globex API remains responsive (HTTP 200, p95 < 450ms) and serves cached CBR/DaData fallback payloads",
+    "probes": [
+      {
+        "type": "probe",
+        "name": "globex-api-health-endpoint",
+        "tolerance": {
+          "type": "status",
+          "status": 200,
+          "max_latency_ms": 300
+        },
+        "provider": {
+          "type": "http",
+          "url": "https://api.globlex.pro/health",
+          "method": "GET",
+          "timeout": 2000,
+          "simulation": {
+            "before": { "status": 200, "latency_ms": 42, "fallback_active": false },
+            "after": { "status": 200, "latency_ms": 168, "fallback_active": true }
+          }
+        }
+      },
+      {
+        "type": "probe",
+        "name": "cbr-dadata-fallback-circuit-breaker",
+        "tolerance": {
+          "type": "jsonpath",
+          "expect": "healthy_or_cached_fallback",
+          "max_latency_ms": 450
+        },
+        "provider": {
+          "type": "http",
+          "url": "https://api.globlex.pro/api/v1/rates/status",
+          "method": "GET",
+          "timeout": 2500,
+          "simulation": {
+            "before": { "status": 200, "latency_ms": 65, "state": "healthy_or_cached_fallback" },
+            "after": { "status": 200, "latency_ms": 285, "state": "healthy_or_cached_fallback" }
+          }
+        }
+      },
+      {
+        "type": "probe",
+        "name": "postgres-connection-pool-headroom",
+        "tolerance": {
+          "type": "range",
+          "field": "pool_wait_queue",
+          "max": 5
+        },
+        "provider": {
+          "type": "metric",
+          "source": "globex-backend-1",
+          "metric": "pg_pool_waiting_clients",
+          "simulation": {
+            "before": { "status": 200, "latency_ms": 18, "pool_wait_queue": 0 },
+            "after": { "status": 200, "latency_ms": 49, "pool_wait_queue": 2 }
+          }
+        }
+      }
+    ]
+  },
+  "method": [
+    {
+      "type": "action",
+      "name": "inject-upstream-cbr-dadata-latency-250ms",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.network",
+        "func": "inject_upstream_latency",
+        "arguments": {
+          "targets": ["cbr.ru", "suggestions.dadata.ru"],
+          "latency_ms": 250,
+          "jitter_ms": 35,
+          "timeout_fallback": "stale-while-revalidate"
+        }
+      },
+      "pauses": { "after": 1 }
+    },
+    {
+      "type": "action",
+      "name": "saturate-db-connection-pool-burst",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.db",
+        "func": "simulate_pool_saturation",
+        "arguments": {
+          "container": "globex-backend-1",
+          "active_connections_pct": 92,
+          "acquire_timeout_ms": 1000
+        }
+      },
+      "pauses": { "after": 1 }
+    },
+    {
+      "type": "probe",
+      "name": "verify-circuit-breaker-engaged-under-stress",
+      "provider": {
+        "type": "http",
+        "url": "https://globlex.pro/api/health",
+        "method": "GET",
+        "simulation": {
+          "during": { "status": 200, "latency_ms": 290, "circuit_breaker": "HALF_OPEN_CACHED" }
+        }
+      }
+    }
+  ],
+  "rollbacks": [
+    {
+      "type": "action",
+      "name": "clear-upstream-latency-and-drain-pool",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.recovery",
+        "func": "restore_nominal_pool_and_network",
+        "arguments": {
+          "service": "api.globlex.pro",
+          "simulated_mttr_ms": 840
+        }
+      }
+    }
+  ]
+}

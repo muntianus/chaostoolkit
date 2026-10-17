@@ -1,0 +1,125 @@
+{
+  "version": "1.0.0",
+  "id": "vps-cgroup-memory-pressure",
+  "title": "VPS cgroup v2 Memory Pressure & Container Restart Policy Verification",
+  "description": "Verifies Docker container restart policy (unless-stopped) and cgroup v2 OOM threshold headroom across critical VPS workloads: ops-grafana, ops-cadvisor, and globex-backend-1.",
+  "tags": ["vps", "cgroup", "memory-pressure", "docker", "oom-headroom", "aco.perfops.shop"],
+  "configuration": {
+    "target_host": "vps.perfops.tech",
+    "monitored_containers": ["ops-grafana", "ops-cadvisor", "globex-backend-1"],
+    "required_restart_policy": "unless-stopped",
+    "max_memory_utilization_pct": 85,
+    "mttr_budget_ms": 2500
+  },
+  "steady-state-hypothesis": {
+    "title": "All critical containers enforce unless-stopped restart policy and maintain >=15% OOM memory headroom",
+    "probes": [
+      {
+        "type": "probe",
+        "name": "verify-container-restart-policies",
+        "tolerance": {
+          "type": "equals",
+          "field": "restart_policy",
+          "expect": "unless-stopped"
+        },
+        "provider": {
+          "type": "docker_inspect",
+          "containers": ["ops-grafana", "ops-cadvisor", "globex-backend-1"],
+          "simulation": {
+            "before": {
+              "status": 200,
+              "latency_ms": 24,
+              "restart_policy": "unless-stopped",
+              "containers_verified": ["ops-grafana", "ops-cadvisor", "globex-backend-1"]
+            },
+            "after": {
+              "status": 200,
+              "latency_ms": 28,
+              "restart_policy": "unless-stopped",
+              "containers_verified": ["ops-grafana", "ops-cadvisor", "globex-backend-1"]
+            }
+          }
+        }
+      },
+      {
+        "type": "probe",
+        "name": "verify-cgroup-oom-headroom",
+        "tolerance": {
+          "type": "range",
+          "field": "peak_memory_pct",
+          "max": 85
+        },
+        "provider": {
+          "type": "cgroup_metric",
+          "containers": ["ops-grafana", "ops-cadvisor", "globex-backend-1"],
+          "metric": "memory.current_pct",
+          "simulation": {
+            "before": {
+              "status": 200,
+              "latency_ms": 19,
+              "peak_memory_pct": 61,
+              "oom_kills": 0,
+              "breakdown": {
+                "ops-grafana": "48%",
+                "ops-cadvisor": "54%",
+                "globex-backend-1": "61%"
+              }
+            },
+            "after": {
+              "status": 200,
+              "latency_ms": 31,
+              "peak_memory_pct": 74,
+              "oom_kills": 0,
+              "breakdown": {
+                "ops-grafana": "52%",
+                "ops-cadvisor": "63%",
+                "globex-backend-1": "74%"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "method": [
+    {
+      "type": "action",
+      "name": "allocate-transient-cgroup-page-cache-pressure",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.cgroup",
+        "func": "stress_cgroup_memory_high",
+        "arguments": {
+          "containers": ["ops-grafana", "ops-cadvisor", "globex-backend-1"],
+          "target_pressure_pct": 78,
+          "duration_ms": 1500
+        }
+      }
+    },
+    {
+      "type": "probe",
+      "name": "verify-zero-oom-killer-invocations",
+      "provider": {
+        "type": "cgroup_metric",
+        "metric": "memory.events.oom_kill",
+        "simulation": {
+          "during": { "status": 200, "latency_ms": 15, "oom_kill": 0, "memory_throttle_events": 1 }
+        }
+      }
+    }
+  ],
+  "rollbacks": [
+    {
+      "type": "action",
+      "name": "release-cgroup-buffer-and-reclaim-pages",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.cgroup",
+        "func": "release_memory_pressure",
+        "arguments": {
+          "simulated_mttr_ms": 620
+        }
+      }
+    }
+  ]
+}

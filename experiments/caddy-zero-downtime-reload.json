@@ -1,0 +1,99 @@
+{
+  "version": "1.0.0",
+  "id": "caddy-zero-downtime-reload",
+  "title": "Caddy Reverse-Proxy Zero-Downtime Reload & @perfops_bot Anti-Flapping Debounce",
+  "description": "Verifies zero dropped HTTP requests across globlex.pro and aco.perfops.shop during Caddy config reload and confirms @perfops_bot alert debounce suppresses transient sub-second reload blips.",
+  "tags": ["caddy", "zero-downtime", "perfops_bot", "anti-flapping", "aco.perfops.shop", "globlex.pro"],
+  "configuration": {
+    "proxy_service": "caddy-edge-proxy",
+    "protected_upstreams": ["https://api.globlex.pro/health", "https://aco.perfops.shop/health"],
+    "bot_handle": "@perfops_bot",
+    "debounce_window_ms": 15000,
+    "allowed_dropped_requests": 0,
+    "mttr_budget_ms": 1000
+  },
+  "steady-state-hypothesis": {
+    "title": "Zero dropped requests during Caddy reload and zero false-positive alerts sent by @perfops_bot",
+    "probes": [
+      {
+        "type": "probe",
+        "name": "caddy-upstreams-zero-dropped-requests",
+        "tolerance": {
+          "type": "range",
+          "field": "dropped_requests",
+          "max": 0
+        },
+        "provider": {
+          "type": "http_load_probe",
+          "url": "https://aco.perfops.shop/health",
+          "method": "GET",
+          "timeout": 2000,
+          "simulation": {
+            "before": { "status": 200, "latency_ms": 29, "dropped_requests": 0, "active_workers": 4 },
+            "after": { "status": 200, "latency_ms": 34, "dropped_requests": 0, "active_workers": 4 }
+          }
+        }
+      },
+      {
+        "type": "probe",
+        "name": "perfops-bot-anti-flapping-debounce-check",
+        "tolerance": {
+          "type": "range",
+          "field": "flapping_alerts_emitted",
+          "max": 0
+        },
+        "provider": {
+          "type": "alert_gate_probe",
+          "bot": "@perfops_bot",
+          "simulation": {
+            "before": { "status": 200, "latency_ms": 12, "flapping_alerts_emitted": 0, "suppressed_blips": 0 },
+            "after": { "status": 200, "latency_ms": 14, "flapping_alerts_emitted": 0, "suppressed_blips": 2 }
+          }
+        }
+      }
+    ]
+  },
+  "method": [
+    {
+      "type": "action",
+      "name": "trigger-graceful-caddy-config-reload",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.caddy",
+        "func": "reload_caddyfile_graceful",
+        "arguments": {
+          "admin_api": "http://localhost:2019/load",
+          "in_flight_requests": 120
+        }
+      }
+    },
+    {
+      "type": "action",
+      "name": "emit-subsecond-synthetic-upstream-blip",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.alerting",
+        "func": "simulate_transient_blip",
+        "arguments": {
+          "bot": "@perfops_bot",
+          "blip_duration_ms": 420,
+          "expected_debounce_ms": 15000
+        }
+      }
+    }
+  ],
+  "rollbacks": [
+    {
+      "type": "action",
+      "name": "verify-caddy-worker-generation-converged",
+      "provider": {
+        "type": "fault_injection",
+        "module": "perfops.faults.caddy",
+        "func": "confirm_worker_drain",
+        "arguments": {
+          "simulated_mttr_ms": 310
+        }
+      }
+    }
+  ]
+}

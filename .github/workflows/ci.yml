@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: ChaosToolkit Resilience & API Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate JSON experiment definitions
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            for (const f of fs.readdirSync("experiments").filter(x => x.endsWith(".json"))) {
+              JSON.parse(fs.readFileSync("experiments/" + f, "utf8"));
+              console.log("Validated:", f);
+            }
+          '
+
+      - name: Run unit & HTTP integration tests
+        run: node --test tests/chaos.test.js
