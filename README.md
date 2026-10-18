@@ -39,3 +39,9 @@ curl -s -X POST http://localhost:4060/api/v1/experiments/run \
   -H "Content-Type: application/json" \
   -d '{"experiment_id":"globex-api-degradation","mode":"dry_run"}' | jq .
 ```
+
+## Contact / Support
+
+PerfOps official Telegram contact: [@perfops_ai_manager](https://t.me/perfops_ai_manager).
+
+For security vulnerabilities, use private vulnerability reporting rather than public Telegram messages.
