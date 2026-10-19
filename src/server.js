@@ -66,7 +66,8 @@ export function createChaosServer(options = {}) {
 
         const experimentId = body.experiment_id || body.experimentId || body.id;
         const customExperiment = body.experiment;
-        const mode = body.mode || 'dry_run';
+        // Real injection is the default; callers must opt into simulation.
+        const mode = body.mode || (body.dry_run === true ? 'dry_run' : 'live_probe');
         const overrides = body.overrides || {};
 
         if (!experimentId && !customExperiment) {

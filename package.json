@@ -6,6 +6,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/server.js",
+    "chaos": "node src/cli.js",
+    "demo:service": "node demo/local-service.js",
     "test": "node --test tests/chaos.test.js"
   },
   "engines": {

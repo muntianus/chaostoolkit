@@ -2,6 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import {
+  SAFE_INJECTIONS,
+  evaluateExpectedEffect,
+  injectHttpError,
+  injectHttpLatency,
+  killDemoProcess,
+  parseAllowedHosts,
+} from './faults.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -164,8 +172,11 @@ async function executeProbe(probe, phase, mode, overrides = {}, fetchImpl = glob
       };
     } catch (err) {
       const latencyMs = Math.max(1, Math.round(performance.now() - startMs));
-      // If live endpoint is unreachable and fallback_to_simulation is enabled or not strict, record fallback or failure
-      if (overrides?.strict_live_network === true) {
+      // Live mode is strict by default: an offline target is a failed probe, not
+      // a simulated pass. Explicit opt-in is required to restore old fallback.
+      const allowFallback =
+        overrides?.allow_live_fallback === true || overrides?.strict_live_network === false;
+      if (!allowFallback) {
         const output = { status: 503, latency_ms: latencyMs, error: err.message, url: provider.url };
         const toleranceCheck = evaluateTolerance(probe.tolerance, output);
         return {
@@ -181,7 +192,7 @@ async function executeProbe(probe, phase, mode, overrides = {}, fetchImpl = glob
           timestamp: new Date().toISOString(),
         };
       }
-      // Graceful fallback to deterministic telemetry snapshot when offline in sandboxed CI
+      // Explicit fallback to deterministic telemetry snapshot when offline in sandboxed CI
       const simFallback = provider.simulation?.[phase] || provider.simulation?.before || { status: 200, latency_ms: 45 };
       const output = { ...simFallback, live_fallback: true, live_error: err.message };
       const toleranceCheck = evaluateTolerance(probe.tolerance, output);
@@ -225,30 +236,172 @@ async function executeProbe(probe, phase, mode, overrides = {}, fetchImpl = glob
   };
 }
 
+function resolveInjectionName(step) {
+  const provider = step.provider || {};
+  const args = provider.arguments || {};
+  const candidates = [provider.func, provider.injection, provider.type, args.injection, args.action];
+  return (
+    candidates.find(
+      (candidate) => typeof candidate === 'string' && SAFE_INJECTIONS.includes(candidate),
+    ) || null
+  );
+}
+
+function defaultExpectedEffect(injection, args) {
+  if (injection === 'http_latency') {
+    const configured = Number(args.latency_ms ?? 100);
+    return {
+      metric: 'latency_delta_ms',
+      min: Math.max(10, Math.round(configured * 0.5)),
+    };
+  }
+  if (injection === 'http_error') {
+    return { metric: 'error_rate', min: 0.9 };
+  }
+  if (injection === 'process_kill') {
+    return { metric: 'exited', equals: true };
+  }
+  return null;
+}
+
+async function executeInjection(step, injection, { fetchImpl, allowedHosts }) {
+  const args = step.provider?.arguments || {};
+  const samples = Math.max(1, Math.min(Number(args.samples) || 5, 20));
+
+  if (injection === 'http_latency') {
+    return injectHttpLatency({
+      targetUrl: args.target_url || args.url || args.target,
+      latencyMs: Number(args.latency_ms ?? 100),
+      jitterMs: Number(args.jitter_ms ?? 0),
+      samples,
+      timeoutMs: Number(args.timeout_ms ?? 2500),
+      fetchImpl,
+      allowedHosts,
+    });
+  }
+
+  if (injection === 'http_error') {
+    return injectHttpError({
+      targetUrl: args.target_url || args.url || args.target,
+      statusCode: Number(args.status_code ?? 503),
+      errorMode: args.error_mode || 'status',
+      timeoutMs: Number(args.timeout_ms ?? 300),
+      samples,
+      fetchImpl,
+      allowedHosts,
+    });
+  }
+
+  if (injection === 'process_kill') {
+    const waitForStdout =
+      args.wait_for_stdout === false
+        ? null
+        : typeof args.wait_for_stdout === 'string'
+          ? args.wait_for_stdout
+          : 'READY';
+    return killDemoProcess({
+      script: args.script,
+      args: args.args,
+      graceMs: Number(args.grace_ms ?? 2000),
+      runMs: Number(args.run_ms ?? 250),
+      waitForStdout,
+      startupTimeoutMs: Number(args.startup_timeout_ms ?? 3000),
+    });
+  }
+
+  throw new Error(`Unsupported fault injection '${injection}'.`);
+}
+
 /**
  * Executes a method step (action or inline probe).
  */
-async function executeMethodStep(step, mode, overrides, fetchImpl) {
+async function executeMethodStep(step, mode, overrides, fetchImpl, allowedHosts = []) {
   if (step.type === 'probe') {
     return executeProbe(step, 'during', mode, overrides, fetchImpl);
   }
 
   const provider = step.provider || {};
   const args = provider.arguments || {};
+  const injection = resolveInjectionName(step);
   const simulatedDuration = args.latency_ms || args.blip_duration_ms || 35;
-
-  return {
+  const base = {
     activity: step.name,
     type: 'action',
     phase: 'method',
     mode,
-    status: 'succeeded',
     provider_module: provider.module || 'perfops.faults.core',
     provider_func: provider.func || 'inject_fault',
     arguments: args,
-    simulated_only: true,
-    duration_ms: simulatedDuration,
+    injection,
     timestamp: new Date().toISOString(),
+  };
+
+  // Dry-run keeps the historical deterministic simulation and never touches
+  // the network or a child process.
+  if (mode === 'dry_run') {
+    return {
+      ...base,
+      status: 'succeeded',
+      simulated_only: true,
+      network_touched: false,
+      process_touched: false,
+      effect_verified: null,
+      effect_reason: 'dry_run simulation (no real fault injected)',
+      duration_ms: simulatedDuration,
+    };
+  }
+
+  // Live mode must not silently simulate unknown actions: that is exactly the
+  // false-positive behaviour this runner is meant to prevent.
+  if (!injection) {
+    return {
+      ...base,
+      status: 'failed',
+      simulated_only: false,
+      network_touched: false,
+      process_touched: false,
+      effect_verified: false,
+      error: 'unsupported_fault_action',
+      error_message: `Action '${step.name}' is not implemented for real injection. Supported: ${SAFE_INJECTIONS.join(', ')}.`,
+      duration_ms: Math.max(1, Math.round(simulatedDuration)),
+    };
+  }
+
+  const started = performance.now();
+  let output;
+  try {
+    output = await executeInjection(step, injection, { fetchImpl, allowedHosts });
+  } catch (err) {
+    const blocked = err?.code === 'TARGET_NOT_ALLOWED' || err?.code === 'SCRIPT_NOT_ALLOWED';
+    return {
+      ...base,
+      status: blocked ? 'blocked' : 'failed',
+      simulated_only: false,
+      network_touched: false,
+      process_touched: false,
+      effect_verified: false,
+      error: err?.code || 'injection_failed',
+      error_message: err?.message || String(err),
+      output: { error: err?.code || 'injection_failed', message: err?.message || String(err) },
+      duration_ms: Math.max(1, Math.round(performance.now() - started)),
+    };
+  }
+
+  const expected = step.expected_effect || args.expected_effect || defaultExpectedEffect(injection, args);
+  const effect = evaluateExpectedEffect(expected, output);
+
+  return {
+    ...base,
+    status: effect.verified ? 'succeeded' : 'failed',
+    simulated_only: false,
+    network_touched: Boolean(output.network_touched),
+    process_touched: Boolean(output.process_touched),
+    output,
+    expected_effect: expected,
+    effect_verified: effect.verified,
+    effect_reason: effect.reason,
+    error: effect.verified ? undefined : 'expected_effect_not_observed',
+    duration_ms: Math.max(1, Math.round(performance.now() - started)),
   };
 }
 
@@ -263,12 +416,22 @@ export function computeResilienceScore({
   methodResults,
   mttrMs,
   mttrBudgetMs = 2000,
+  injectionVerified = true,
 }) {
   if (!beforePassed) {
     return {
       score: 20,
       grade: 'F',
       verdict: 'ABORTED_STEADY_STATE_BEFORE',
+      launchgate_ready: false,
+    };
+  }
+
+  if (!injectionVerified) {
+    return {
+      score: 30,
+      grade: 'F',
+      verdict: 'INJECTION_NOT_VERIFIED',
       launchgate_ready: false,
     };
   }
@@ -320,6 +483,10 @@ export class ChaosRunner {
   constructor(options = {}) {
     this.experimentsDir = options.experimentsDir || DEFAULT_EXPERIMENTS_DIR;
     this.fetchImpl = options.fetchImpl || globalThis.fetch;
+    // The allowlist is process configuration, never a per-request override.
+    this.allowedHosts = parseAllowedHosts(
+      options.allowedHosts ?? process.env.CHAOS_ALLOWED_HOSTS ?? '',
+    );
     this.runs = [];
   }
 
@@ -360,10 +527,10 @@ export class ChaosRunner {
    * @param {Object} params
    * @param {string} [params.experimentId] - ID of registered experiment
    * @param {Object} [params.experiment] - Custom experiment JSON definition
-   * @param {'dry_run'|'live_probe'} [params.mode='dry_run'] - Execution mode
+   * @param {'dry_run'|'live_probe'} [params.mode='live_probe'] - Execution mode (live injection by default)
    * @param {Object} [params.overrides] - Optional telemetry/probe overrides for testing failure injection
    */
-  async runExperiment({ experimentId, experiment: customExperiment, mode = 'dry_run', overrides = {} } = {}) {
+  async runExperiment({ experimentId, experiment: customExperiment, mode = 'live_probe', overrides = {} } = {}) {
     if (!['dry_run', 'live_probe'].includes(mode)) {
       throw new Error(`Invalid execution mode '${mode}'. Expected 'dry_run' or 'live_probe'.`);
     }
@@ -392,8 +559,17 @@ export class ChaosRunner {
     const methodJournal = [];
     if (beforePassed) {
       for (const step of experiment.method || []) {
-        const res = await executeMethodStep(step, mode, overrides, this.fetchImpl);
+        const res = await executeMethodStep(
+          step,
+          mode,
+          overrides,
+          this.fetchImpl,
+          this.allowedHosts,
+        );
         methodJournal.push(res);
+        // A failed/blocked real injection invalidates the run; do not execute
+        // the remaining method steps as if the fault had been applied.
+        if (res.type === 'action' && res.status !== 'succeeded') break;
       }
     }
 
@@ -432,6 +608,20 @@ export class ChaosRunner {
         rollbackJournal.reduce((acc, r) => acc + (r.duration_ms || 0), 0);
     const mttrBudgetMs = experiment.configuration?.mttr_budget_ms || 2000;
 
+    const actionResults = methodJournal.filter((m) => m.type === 'action');
+    const injectionResults = actionResults.filter(
+      (m) => m.injection && m.simulated_only === false,
+    );
+    // In live mode every action must be a real injection whose expected effect
+    // was observed. Dry-run keeps the historical simulated verdict.
+    const injectionVerified = !beforePassed
+      ? false
+      : mode === 'dry_run'
+        ? true
+        : actionResults.every(
+            (action) => action.status === 'succeeded' && action.effect_verified === true,
+          );
+
     const resilience = computeResilienceScore({
       beforePassed,
       afterPassed,
@@ -440,9 +630,17 @@ export class ChaosRunner {
       methodResults: methodJournal,
       mttrMs,
       mttrBudgetMs,
+      injectionVerified,
     });
 
-    const overallStatus = beforePassed && afterPassed ? 'completed' : !beforePassed ? 'aborted' : 'deviated';
+    const overallStatus = !beforePassed
+      ? 'aborted'
+      : !injectionVerified
+        ? 'failed'
+        : !afterPassed
+          ? 'deviated'
+          : 'completed';
+    const deviated = beforePassed && (!afterPassed || !injectionVerified);
 
     const report = {
       run_id: runId,
@@ -451,9 +649,16 @@ export class ChaosRunner {
       title: experiment.title,
       mode,
       status: overallStatus,
-      deviated: !afterPassed,
+      deviated,
       started_at: startedAt,
       finished_at: new Date().toISOString(),
+      safety: {
+        dry_run: mode === 'dry_run',
+        injection_enabled: mode === 'live_probe',
+        target_guard: 'loopback-or-allowlist',
+        allowed_hosts: this.allowedHosts,
+        supported_injections: SAFE_INJECTIONS,
+      },
       steady_states: {
         hypothesis: hypothesis.title,
         before: {
@@ -467,12 +672,27 @@ export class ChaosRunner {
       },
       run: methodJournal,
       rollbacks: rollbackJournal,
+      injection: {
+        verified: injectionVerified,
+        attempted: actionResults.length,
+        real_injections: injectionResults.length,
+        effects_verified: actionResults.filter((action) => action.effect_verified === true).length,
+        blocked: actionResults.filter((action) => action.status === 'blocked').length,
+        unsupported: actionResults.filter((action) => action.error === 'unsupported_fault_action')
+          .length,
+      },
       metrics: {
         mttr_ms: mttrMs,
         mttr_budget_ms: mttrBudgetMs,
         mttr_within_budget: mttrMs <= mttrBudgetMs,
         probes_evaluated: beforeProbes.length + afterProbes.length,
-        actions_executed: methodJournal.filter((m) => m.type === 'action').length,
+        actions_executed: actionResults.length,
+        injections_attempted: actionResults.length,
+        real_injections: injectionResults.length,
+        injection_effects_verified: actionResults.filter((action) => action.effect_verified === true)
+          .length,
+        injections_blocked: actionResults.filter((action) => action.status === 'blocked').length,
+        injection_verified: injectionVerified,
       },
       resilience: {
         score: resilience.score,
@@ -489,7 +709,7 @@ export class ChaosRunner {
           'perfops-platform',
         experiment_id: experiment.id || experimentId || 'custom-experiment',
         resilience_score: resilience.score,
-        steady_state_verified: beforePassed && afterPassed,
+        steady_state_verified: beforePassed && afterPassed && injectionVerified,
         mttr_ms: mttrMs,
         recommendation: resilience.launchgate_ready ? 'PASS' : 'BLOCK',
       },
