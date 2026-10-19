@@ -4,6 +4,21 @@ export {
   evaluateTolerance,
   computeResilienceScore,
 } from './src/runner.js';
+export {
+  FaultProxy,
+  DEFAULT_DENIED_HOSTS,
+  SAFE_INJECTIONS,
+  TargetGuardError,
+  ScriptGuardError,
+  assertLocalTarget,
+  evaluateExpectedEffect,
+  injectHttpError,
+  injectHttpLatency,
+  isLoopbackHost,
+  killDemoProcess,
+  parseAllowedHosts,
+  probeEndpoint,
+} from './src/faults.js';
 export { createChaosServer, startServer } from './src/server.js';
 
 // Backward-compatible steady-state hypothesis descriptor
