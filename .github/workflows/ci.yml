@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: ChaosToolkit Resilience & API Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, hostinger-vps]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
