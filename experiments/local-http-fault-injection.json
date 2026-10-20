@@ -1,0 +1,95 @@
+{
+  "version": "1.0.0",
+  "id": "local-http-fault-injection",
+  "title": "Local HTTP Latency & 5xx Fault Injection (loopback only)",
+  "description": "Safe CI/local experiment that injects real latency and 5xx responses through an in-process fault proxy against the local demo target (npm run demo:service -- --port 4061). Real injection is rejected for any non-loopback target.",
+  "tags": ["local", "loopback", "http_latency", "http_error", "ci-safe", "real-injection"],
+  "configuration": {
+    "target_service": "local-demo-service",
+    "target_url": "http://127.0.0.1:4061",
+    "injected_latency_ms": 150,
+    "injected_status_code": 503,
+    "mttr_budget_ms": 1000
+  },
+  "steady-state-hypothesis": {
+    "title": "Local demo target answers HTTP 200 and stays below 1000ms",
+    "probes": [
+      {
+        "type": "probe",
+        "name": "local-demo-health-status",
+        "tolerance": {
+          "type": "status",
+          "status": 200,
+          "max_latency_ms": 1000
+        },
+        "provider": {
+          "type": "http",
+          "url": "http://127.0.0.1:4061/health",
+          "method": "GET",
+          "timeout": 1000,
+          "simulation": {
+            "before": { "status": 200, "latency_ms": 4 },
+            "after": { "status": 200, "latency_ms": 5 }
+          }
+        }
+      },
+      {
+        "type": "probe",
+        "name": "local-demo-health-latency",
+        "tolerance": {
+          "type": "range",
+          "field": "latency_ms",
+          "max": 1000
+        },
+        "provider": {
+          "type": "http",
+          "url": "http://127.0.0.1:4061/health",
+          "method": "GET",
+          "timeout": 1000,
+          "simulation": {
+            "before": { "status": 200, "latency_ms": 4 },
+            "after": { "status": 200, "latency_ms": 5 }
+          }
+        }
+      }
+    ]
+  },
+  "method": [
+    {
+      "type": "action",
+      "name": "inject-local-http-latency-150ms",
+      "provider": {
+        "type": "fault_injection",
+        "func": "http_latency",
+        "arguments": {
+          "target_url": "http://127.0.0.1:4061/health",
+          "latency_ms": 150,
+          "jitter_ms": 20,
+          "samples": 5
+        }
+      },
+      "expected_effect": {
+        "metric": "latency_delta_ms",
+        "min": 100
+      }
+    },
+    {
+      "type": "action",
+      "name": "inject-local-http-503",
+      "provider": {
+        "type": "fault_injection",
+        "func": "http_error",
+        "arguments": {
+          "target_url": "http://127.0.0.1:4061/health",
+          "status_code": 503,
+          "samples": 5
+        }
+      },
+      "expected_effect": {
+        "metric": "error_rate",
+        "min": 0.9
+      }
+    }
+  ],
+  "rollbacks": []
+}

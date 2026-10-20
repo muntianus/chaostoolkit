@@ -5,6 +5,7 @@ WORKDIR /app
 COPY package.json index.js ./
 COPY src ./src
 COPY experiments ./experiments
+COPY demo ./demo
 
 ENV NODE_ENV=production
 ENV PORT=4060
