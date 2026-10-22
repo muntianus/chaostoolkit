@@ -116,6 +116,17 @@ status is `failed`, and `launchgate_report.recommendation` is `BLOCK`.
 - Live metric probes (Docker/cgroup/alert-gate) are not implemented as real
   collectors; only HTTP probes and the three actions above perform real I/O.
 
+## API contract, CI & deploy
+
+- **Contract:** [`docs/api/openapi.json`](docs/api/openapi.json) (OpenAPI 3.1).
+  `tests/openapi-contract.test.js` fails when `ROUTES` in `src/server.js` and the spec disagree.
+- **Tests:** `npm test` — Node's built-in runner, no dependencies. CI runs it on every pull request;
+  GitGuardian scans each one for secrets.
+- **Config:** every environment variable is listed in [`.env.example`](.env.example).
+- **Deploy:** `docker build -t chaostoolkit . && docker run -p 4060:4060 chaostoolkit` — `node:22-alpine`,
+  non-root, `HEALTHCHECK` on `GET /health`. The portfolio port map lives in
+  [`muntianus/architecture`](https://github.com/muntianus/architecture).
+
 ## Contact / Support
 
 PerfOps official Telegram contact: [@perfops_ai_manager](https://t.me/perfops_ai_manager).

@@ -31,75 +31,91 @@ function readJsonBody(req) {
   });
 }
 
+function health(req, res) {
+  return sendJson(res, 200, {
+    status: 'ok',
+    service: 'perfops-chaostoolkit',
+    version: '1.0.0',
+  });
+}
+
+function listExperiments(req, res, url, { runner }) {
+  const experiments = runner.listExperiments();
+  return sendJson(res, 200, {
+    count: experiments.length,
+    experiments,
+  });
+}
+
+async function runExperiment(req, res, url, { runner }) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (parseErr) {
+    return sendJson(res, 400, { error: parseErr.message });
+  }
+
+  const experimentId = body.experiment_id || body.experimentId || body.id;
+  const customExperiment = body.experiment;
+  // Real injection is the default; callers must opt into simulation.
+  const mode = body.mode || (body.dry_run === true ? 'dry_run' : 'live_probe');
+  const overrides = body.overrides || {};
+
+  if (!experimentId && !customExperiment) {
+    return sendJson(res, 400, {
+      error: "Missing 'experiment_id' or inline 'experiment' definition in request body.",
+    });
+  }
+
+  try {
+    const report = await runner.runExperiment({
+      experimentId,
+      experiment: customExperiment,
+      mode,
+      overrides,
+    });
+    return sendJson(res, 200, report);
+  } catch (runErr) {
+    const status = runErr.code === 'EXPERIMENT_NOT_FOUND' ? 404 : 400;
+    return sendJson(res, status, { error: runErr.message, code: runErr.code || 'RUN_ERROR' });
+  }
+}
+
+function listRuns(req, res, url, { runner }) {
+  const runs = runner.listRuns();
+  return sendJson(res, 200, {
+    count: runs.length,
+    runs,
+  });
+}
+
+/**
+ * Every route the service answers. Handlers get `(req, res, url, ctx)` where
+ * ctx = { runner }. tests/openapi-contract.test.js keeps this table and
+ * docs/api/openapi.json in lockstep.
+ */
+export const ROUTES = [
+  { method: 'GET', path: '/health', handler: health },
+  { method: 'GET', path: '/api/v1/experiments', handler: listExperiments },
+  { method: 'POST', path: '/api/v1/experiments/run', handler: runExperiment },
+  { method: 'GET', path: '/api/v1/runs', handler: listRuns },
+];
+
 export function createChaosServer(options = {}) {
   const runner = options.runner || new ChaosRunner(options);
+  const ctx = { runner };
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-    const pathname = url.pathname;
     const method = req.method || 'GET';
 
     try {
-      if (method === 'GET' && pathname === '/health') {
-        return sendJson(res, 200, {
-          status: 'ok',
-          service: 'perfops-chaostoolkit',
-          version: '1.0.0',
-        });
+      const route = ROUTES.find((r) => r.method === method && r.path === url.pathname);
+      if (route) {
+        return await route.handler(req, res, url, ctx);
       }
-
-      if (method === 'GET' && pathname === '/api/v1/experiments') {
-        const experiments = runner.listExperiments();
-        return sendJson(res, 200, {
-          count: experiments.length,
-          experiments,
-        });
-      }
-
-      if (method === 'POST' && pathname === '/api/v1/experiments/run') {
-        let body;
-        try {
-          body = await readJsonBody(req);
-        } catch (parseErr) {
-          return sendJson(res, 400, { error: parseErr.message });
-        }
-
-        const experimentId = body.experiment_id || body.experimentId || body.id;
-        const customExperiment = body.experiment;
-        // Real injection is the default; callers must opt into simulation.
-        const mode = body.mode || (body.dry_run === true ? 'dry_run' : 'live_probe');
-        const overrides = body.overrides || {};
-
-        if (!experimentId && !customExperiment) {
-          return sendJson(res, 400, {
-            error: "Missing 'experiment_id' or inline 'experiment' definition in request body.",
-          });
-        }
-
-        try {
-          const report = await runner.runExperiment({
-            experimentId,
-            experiment: customExperiment,
-            mode,
-            overrides,
-          });
-          return sendJson(res, 200, report);
-        } catch (runErr) {
-          const status = runErr.code === 'EXPERIMENT_NOT_FOUND' ? 404 : 400;
-          return sendJson(res, status, { error: runErr.message, code: runErr.code || 'RUN_ERROR' });
-        }
-      }
-
-      if (method === 'GET' && pathname === '/api/v1/runs') {
-        const runs = runner.listRuns();
-        return sendJson(res, 200, {
-          count: runs.length,
-          runs,
-        });
-      }
-
       return sendJson(res, 404, {
-        error: `Route ${method} ${pathname} not found`,
+        error: `Route ${method} ${url.pathname} not found`,
       });
     } catch (err) {
       return sendJson(res, 500, {

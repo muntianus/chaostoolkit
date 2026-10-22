@@ -8,7 +8,7 @@
     "start": "node src/server.js",
     "chaos": "node src/cli.js",
     "demo:service": "node demo/local-service.js",
-    "test": "node --test tests/chaos.test.js"
+    "test": "node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=20.0.0"
