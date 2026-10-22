@@ -1,0 +1,396 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PerfOps ChaosToolkit",
+    "version": "1.0.0",
+    "description": "Chaos experiment runner with steady-state verification, guarded local fault injection and LaunchGate resilience scoring."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:4060",
+      "description": "Local / VPS loopback"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Liveness probe (no dependencies)",
+        "tags": [
+          "ops"
+        ],
+        "responses": {
+          "200": {
+            "description": "Service is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments": {
+      "get": {
+        "operationId": "listExperiments",
+        "summary": "List the bundled experiment definitions",
+        "tags": [
+          "experiments"
+        ],
+        "responses": {
+          "200": {
+            "description": "Experiments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "count",
+                    "experiments"
+                  ],
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "experiments": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Experiment"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/run": {
+      "post": {
+        "operationId": "runExperiment",
+        "summary": "Run a bundled or inline experiment (real local injection unless dry_run)",
+        "description": "`live_probe` (the default) injects real faults, but only against loopback hosts or CHAOS_ALLOWED_HOSTS; process_kill only runs scripts from the bundled demo directories.",
+        "tags": [
+          "experiments"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunRequest"
+              },
+              "example": {
+                "experiment_id": "globex-api-degradation",
+                "dry_run": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON, missing experiment, invalid mode or a target/script guard refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "examples": [
+                        "RUN_ERROR",
+                        "EXPERIMENT_NOT_FOUND"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown experiment_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "examples": [
+                        "RUN_ERROR",
+                        "EXPERIMENT_NOT_FOUND"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs": {
+      "get": {
+        "operationId": "listRuns",
+        "summary": "List run reports from this process (in-memory)",
+        "tags": [
+          "experiments"
+        ],
+        "responses": {
+          "200": {
+            "description": "Runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "count",
+                    "runs"
+                  ],
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RunReport"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": [
+          "status",
+          "service",
+          "version"
+        ],
+        "properties": {
+          "status": {
+            "const": "ok"
+          },
+          "service": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "Experiment": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "configuration": {
+            "type": "object"
+          },
+          "steady_state_hypothesis": {
+            "type": "object"
+          },
+          "method_steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "rollback_steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "RunRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Provide experiment_id (or its aliases experimentId / id) or an inline experiment.",
+        "properties": {
+          "experiment_id": {
+            "type": "string"
+          },
+          "experimentId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "experiment": {
+            "type": "object",
+            "description": "Inline Chaos Toolkit-style definition"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "dry_run",
+              "live_probe"
+            ],
+            "default": "live_probe"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Shorthand for mode=dry_run"
+          },
+          "overrides": {
+            "type": "object"
+          }
+        }
+      },
+      "RunReport": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "experiment_id",
+          "mode",
+          "status"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "chaoslib_version": {
+            "type": "string"
+          },
+          "experiment_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "dry_run",
+              "live_probe"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "deviated": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "safety": {
+            "type": "object"
+          },
+          "steady_states": {
+            "type": "object"
+          },
+          "run": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "rollbacks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "injection": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "metrics": {
+            "type": "object"
+          },
+          "resilience": {
+            "type": "object"
+          },
+          "launchgate_report": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

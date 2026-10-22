@@ -3,3 +3,6 @@ node_modules/
 *.log
 coverage/
 .DS_Store
+# local config — only .env.example is tracked
+.env.*
+!.env.example
