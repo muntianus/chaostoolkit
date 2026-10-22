@@ -41,3 +41,15 @@ test('JSON request bodies carry an example', () => {
     if (media) assert.ok(media.example ?? media.examples, `${key} request body lacks an example`);
   }
 });
+
+test('run endpoint documents the dry_run default and the 403 live refusal', () => {
+  const run = spec.paths['/api/v1/experiments/run'].post;
+  assert.equal(spec.components.schemas.RunRequest.properties.mode.default, 'dry_run');
+
+  const forbidden = run.responses['403'];
+  assert.ok(forbidden, 'POST /api/v1/experiments/run lacks a 403 response');
+  const schema = forbidden.content['application/json'].schema;
+  assert.ok(schema.required.includes('code'), '403 body must carry an error code');
+  assert.deepEqual(schema.properties.code.enum, ['LIVE_MODE_DISABLED']);
+  assert.match(forbidden.description, /CHAOS_LIVE_ENABLED/);
+});

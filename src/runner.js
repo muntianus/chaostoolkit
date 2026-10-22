@@ -15,6 +15,33 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEFAULT_EXPERIMENTS_DIR = path.resolve(__dirname, '../experiments');
 
+export const EXECUTION_MODES = Object.freeze(['dry_run', 'live_probe']);
+// Safe by default: simulation never touches the network or a child process.
+export const DEFAULT_MODE = 'dry_run';
+// Process-level kill switch that authorises `live_probe`. Never a request field.
+export const LIVE_ENABLED_ENV = 'CHAOS_LIVE_ENABLED';
+
+/**
+ * Thrown (before any probe, injection or child process) when `live_probe` is
+ * requested but the operator has not authorised live injection.
+ */
+export class LiveModeDisabledError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'LiveModeDisabledError';
+    this.code = 'LIVE_MODE_DISABLED';
+  }
+}
+
+/**
+ * Only an explicit `true` (boolean or case-insensitive "true" string) authorises
+ * live injection. Anything else - unset, "1", "yes", "on" - leaves it off.
+ */
+export function parseLiveEnabled(value) {
+  if (value === true) return true;
+  return typeof value === 'string' && value.trim().toLowerCase() === 'true';
+}
+
 /**
  * Loads all ChaosToolkit JSON experiments from the experiments directory.
  */
@@ -487,6 +514,9 @@ export class ChaosRunner {
     this.allowedHosts = parseAllowedHosts(
       options.allowedHosts ?? process.env.CHAOS_ALLOWED_HOSTS ?? '',
     );
+    // Same for the live kill switch: set by the operator (CHAOS_LIVE_ENABLED),
+    // never widened by a request body, override or CLI flag.
+    this.liveEnabled = parseLiveEnabled(options.liveEnabled ?? process.env[LIVE_ENABLED_ENV]);
     this.runs = [];
   }
 
@@ -527,12 +557,22 @@ export class ChaosRunner {
    * @param {Object} params
    * @param {string} [params.experimentId] - ID of registered experiment
    * @param {Object} [params.experiment] - Custom experiment JSON definition
-   * @param {'dry_run'|'live_probe'} [params.mode='live_probe'] - Execution mode (live injection by default)
+   * @param {'dry_run'|'live_probe'} [params.mode='dry_run'] - Execution mode. `live_probe` is refused with
+   *   LiveModeDisabledError unless the runner was authorised (CHAOS_LIVE_ENABLED=true).
    * @param {Object} [params.overrides] - Optional telemetry/probe overrides for testing failure injection
    */
-  async runExperiment({ experimentId, experiment: customExperiment, mode = 'live_probe', overrides = {} } = {}) {
-    if (!['dry_run', 'live_probe'].includes(mode)) {
+  async runExperiment({ experimentId, experiment: customExperiment, mode = DEFAULT_MODE, overrides = {} } = {}) {
+    if (!EXECUTION_MODES.includes(mode)) {
       throw new Error(`Invalid execution mode '${mode}'. Expected 'dry_run' or 'live_probe'.`);
+    }
+
+    // Kill switch: must be the first gate, ahead of experiment lookup, probes,
+    // injections and child processes, so a refused request has no side effects.
+    if (mode === 'live_probe' && !this.liveEnabled) {
+      throw new LiveModeDisabledError(
+        `Live fault injection is disabled: mode 'live_probe' requires ${LIVE_ENABLED_ENV}=true in the service environment ` +
+          "(it cannot be enabled per request). Use mode 'dry_run' for simulation.",
+      );
     }
 
     const experiment = customExperiment || this.getExperiment(experimentId);

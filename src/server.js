@@ -47,6 +47,11 @@ function listExperiments(req, res, url, { runner }) {
   });
 }
 
+const RUN_ERROR_STATUS = {
+  EXPERIMENT_NOT_FOUND: 404,
+  LIVE_MODE_DISABLED: 403,
+};
+
 async function runExperiment(req, res, url, { runner }) {
   let body;
   try {
@@ -57,8 +62,10 @@ async function runExperiment(req, res, url, { runner }) {
 
   const experimentId = body.experiment_id || body.experimentId || body.id;
   const customExperiment = body.experiment;
-  // Real injection is the default; callers must opt into simulation.
-  const mode = body.mode || (body.dry_run === true ? 'dry_run' : 'live_probe');
+  // Simulation is the default. Live injection needs an explicit request here
+  // (mode=live_probe or dry_run=false) AND the CHAOS_LIVE_ENABLED kill switch,
+  // which the runner enforces before doing anything else.
+  const mode = body.mode || (body.dry_run === false ? 'live_probe' : 'dry_run');
   const overrides = body.overrides || {};
 
   if (!experimentId && !customExperiment) {
@@ -76,7 +83,7 @@ async function runExperiment(req, res, url, { runner }) {
     });
     return sendJson(res, 200, report);
   } catch (runErr) {
-    const status = runErr.code === 'EXPERIMENT_NOT_FOUND' ? 404 : 400;
+    const status = Object.hasOwn(RUN_ERROR_STATUS, runErr.code) ? RUN_ERROR_STATUS[runErr.code] : 400;
     return sendJson(res, status, { error: runErr.message, code: runErr.code || 'RUN_ERROR' });
   }
 }

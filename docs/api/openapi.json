@@ -72,8 +72,8 @@
     "/api/v1/experiments/run": {
       "post": {
         "operationId": "runExperiment",
-        "summary": "Run a bundled or inline experiment (real local injection unless dry_run)",
-        "description": "`live_probe` (the default) injects real faults, but only against loopback hosts or CHAOS_ALLOWED_HOSTS; process_kill only runs scripts from the bundled demo directories.",
+        "summary": "Run a bundled or inline experiment (dry-run by default; live injection needs CHAOS_LIVE_ENABLED)",
+        "description": "Runs in `dry_run` unless the request asks for live injection. `mode=live_probe` (or `dry_run=false`) is refused with 403 `LIVE_MODE_DISABLED`, before any probe, injection or child process, unless the service was started with `CHAOS_LIVE_ENABLED=true`; that kill switch is process configuration and cannot be enabled per request. When authorised, `live_probe` injects real faults, but only against loopback hosts or CHAOS_ALLOWED_HOSTS; process_kill only runs scripts from the bundled demo directories.",
         "tags": [
           "experiments"
         ],
@@ -120,6 +120,31 @@
                       "examples": [
                         "RUN_ERROR",
                         "EXPERIMENT_NOT_FOUND"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Live injection requested (mode=live_probe or dry_run=false) but the service is not authorised: CHAOS_LIVE_ENABLED is not \"true\". Nothing was probed, injected or journaled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "code"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "LIVE_MODE_DISABLED"
                       ]
                     }
                   }
@@ -303,11 +328,12 @@
               "dry_run",
               "live_probe"
             ],
-            "default": "live_probe"
+            "default": "dry_run",
+            "description": "`dry_run` (default) simulates the experiment and never touches the network or a child process. `live_probe` injects real faults and requires the service to run with CHAOS_LIVE_ENABLED=true (else 403 LIVE_MODE_DISABLED)."
           },
           "dry_run": {
             "type": "boolean",
-            "description": "Shorthand for mode=dry_run"
+            "description": "Shorthand when `mode` is absent: true is dry_run (the default anyway); false requests live_probe, which still needs CHAOS_LIVE_ENABLED=true."
           },
           "overrides": {
             "type": "object"

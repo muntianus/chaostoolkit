@@ -4,11 +4,12 @@ import { ChaosRunner } from './runner.js';
 function usage() {
   console.error(
     [
-      'Usage: node src/cli.js --experiment <id> [--dry-run]',
+      'Usage: node src/cli.js --experiment <id> [--dry-run | --live]',
       '       node src/cli.js --list',
       '',
-      'Real fault injection is the default. --dry-run restores the legacy',
-      'simulated behaviour and never touches the network.',
+      'Dry-run is the default: the experiment is simulated and never touches the',
+      'network or a child process. --live requests real fault injection and is',
+      'refused (exit 3) unless CHAOS_LIVE_ENABLED=true is set in the environment.',
       '',
       'Safety: injection targets must be loopback or listed in CHAOS_ALLOWED_HOSTS.',
     ].join('\n'),
@@ -40,13 +41,25 @@ if (!experimentId || experimentId === true) {
   process.exit(2);
 }
 
-const mode = args.includes('--dry-run') ? 'dry_run' : 'live_probe';
+if (args.includes('--dry-run') && args.includes('--live')) {
+  console.error('--dry-run and --live are mutually exclusive.');
+  usage();
+  process.exit(2);
+}
+
+// Simulation unless --live is passed; the runner then enforces CHAOS_LIVE_ENABLED.
+const mode = args.includes('--live') ? 'live_probe' : 'dry_run';
 
 try {
   const report = await runner.runExperiment({ experimentId, mode });
   console.log(JSON.stringify(report, null, 2));
   process.exitCode = report.launchgate_report.recommendation === 'PASS' ? 0 : 1;
 } catch (err) {
-  console.error(`chaos run failed: ${err.message}`);
-  process.exitCode = 1;
+  if (err.code === 'LIVE_MODE_DISABLED') {
+    console.error(`chaos run refused [${err.code}]: ${err.message}`);
+    process.exitCode = 3;
+  } else {
+    console.error(`chaos run failed: ${err.message}`);
+    process.exitCode = 1;
+  }
 }
