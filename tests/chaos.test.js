@@ -1,6 +1,5 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import { ChaosRunner } from '../src/runner.js';
 import { startServer } from '../src/server.js';
 import {
@@ -9,75 +8,7 @@ import {
   injectHttpLatency,
   killDemoProcess,
 } from '../src/faults.js';
-
-async function startLocalTarget() {
-  const server = http.createServer((req, res) => {
-    if (req.url === '/health') {
-      const body = JSON.stringify({ status: 'ok' });
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(body);
-      return;
-    }
-    res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: 'not_found' }));
-  });
-
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return {
-    server,
-    url: `http://127.0.0.1:${server.address().port}`,
-    async close() {
-      server.closeAllConnections?.();
-      await new Promise((resolve) => server.close(resolve));
-    },
-  };
-}
-
-function localExperiment(targetUrl, method = []) {
-  return {
-    id: 'local-fault-injection',
-    title: 'Local fault injection steady-state check',
-    'steady-state-hypothesis': {
-      title: 'Local target answers HTTP 200',
-      probes: [
-        {
-          type: 'probe',
-          name: 'local-health',
-          tolerance: { type: 'status', status: 200, max_latency_ms: 1500 },
-          provider: {
-            type: 'http',
-            url: `${targetUrl}/health`,
-            method: 'GET',
-            timeout: 1500,
-            simulation: {
-              before: { status: 200, latency_ms: 5 },
-              after: { status: 200, latency_ms: 5 },
-            },
-          },
-        },
-      ],
-    },
-    method,
-    rollbacks: [],
-  };
-}
-
-function latencyAction(targetUrl, latencyMs, extra = {}) {
-  return {
-    type: 'action',
-    name: `inject-latency-${latencyMs}ms`,
-    provider: {
-      type: 'fault_injection',
-      func: 'http_latency',
-      arguments: {
-        target_url: `${targetUrl}/health`,
-        latency_ms: latencyMs,
-        samples: 3,
-        ...extra,
-      },
-    },
-  };
-}
+import { latencyAction, localExperiment, startLocalTarget } from './helpers/chaos-fixtures.js';
 
 describe('PerfOps ChaosToolkit Runner & Experiment Catalog', () => {
   const runner = new ChaosRunner();
@@ -195,7 +126,7 @@ describe('PerfOps ChaosToolkit Runner & Experiment Catalog', () => {
 
   it('supports live_probe mode with custom fetch implementation', async () => {
     const mockFetch = async () => ({ status: 200 });
-    const liveRunner = new ChaosRunner({ fetchImpl: mockFetch });
+    const liveRunner = new ChaosRunner({ liveEnabled: true, fetchImpl: mockFetch });
     const report = await liveRunner.runExperiment({
       experiment: {
         id: 'custom-live-probe',
@@ -224,6 +155,7 @@ describe('PerfOps ChaosToolkit Runner & Experiment Catalog', () => {
 
   it('fails a live probe instead of silently falling back to simulation', async () => {
     const offlineRunner = new ChaosRunner({
+      liveEnabled: true,
       fetchImpl: async () => {
         throw new Error('ECONNREFUSED');
       },
@@ -265,7 +197,7 @@ describe('PerfOps ChaosToolkit real fault injection', () => {
   it('http_latency really increases latency and verifies the expected effect', async () => {
     const target = await startLocalTarget();
     try {
-      const runner = new ChaosRunner({ fetchImpl: globalThis.fetch });
+      const runner = new ChaosRunner({ liveEnabled: true, fetchImpl: globalThis.fetch });
       const report = await runner.runExperiment({
         experiment: localExperiment(target.url, [latencyAction(target.url, 150)]),
         mode: 'live_probe',
@@ -293,7 +225,7 @@ describe('PerfOps ChaosToolkit real fault injection', () => {
   it('http_error injects 5xx responses and observes request errors', async () => {
     const target = await startLocalTarget();
     try {
-      const runner = new ChaosRunner({ fetchImpl: globalThis.fetch });
+      const runner = new ChaosRunner({ liveEnabled: true, fetchImpl: globalThis.fetch });
       const report = await runner.runExperiment({
         experiment: localExperiment(target.url, [
           {
@@ -332,6 +264,7 @@ describe('PerfOps ChaosToolkit real fault injection', () => {
     const requestedUrls = [];
     try {
       const runner = new ChaosRunner({
+        liveEnabled: true,
         fetchImpl: async (url, options) => {
           requestedUrls.push(String(url));
           return globalThis.fetch(url, options);
@@ -412,7 +345,7 @@ describe('PerfOps ChaosToolkit real fault injection', () => {
   it('fails the experiment when injection produces no expected deviation', async () => {
     const target = await startLocalTarget();
     try {
-      const runner = new ChaosRunner({ fetchImpl: globalThis.fetch });
+      const runner = new ChaosRunner({ liveEnabled: true, fetchImpl: globalThis.fetch });
       const report = await runner.runExperiment({
         experiment: localExperiment(target.url, [
           latencyAction(target.url, 5, {
@@ -441,7 +374,7 @@ describe('PerfOps ChaosToolkit real fault injection', () => {
   it('process_kill terminates only the child process spawned by the runner', async () => {
     const target = await startLocalTarget();
     try {
-      const runner = new ChaosRunner({ fetchImpl: globalThis.fetch });
+      const runner = new ChaosRunner({ liveEnabled: true, fetchImpl: globalThis.fetch });
       const report = await runner.runExperiment({
         experiment: localExperiment(target.url, [
           {
@@ -513,7 +446,7 @@ describe('PerfOps ChaosToolkit real fault injection', () => {
   it('does not run unsupported legacy actions as simulated successes in live mode', async () => {
     const target = await startLocalTarget();
     try {
-      const runner = new ChaosRunner({ fetchImpl: globalThis.fetch });
+      const runner = new ChaosRunner({ liveEnabled: true, fetchImpl: globalThis.fetch });
       const report = await runner.runExperiment({
         experiment: localExperiment(target.url, [
           {
@@ -636,21 +569,26 @@ describe('PerfOps ChaosToolkit HTTP API Server', () => {
     assert.equal(runsBody.runs[0].run_id, report.run_id);
   });
 
-  it('defaults POST runs to live injection and blocks external targets', async () => {
-    const experiment = localExperiment(target.url, [
-      latencyAction('https://api.globlex.pro', 250),
-    ]);
-    const res = await fetch(`${baseUrl}/api/v1/experiments/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ experiment }),
-    });
-    assert.equal(res.status, 200);
-    const report = await res.json();
-    assert.equal(report.mode, 'live_probe');
-    assert.equal(report.status, 'failed');
-    assert.equal(report.injection.blocked, 1);
-    assert.equal(report.launchgate_report.recommendation, 'BLOCK');
+  it('blocks external targets through the API when live mode is authorised', async () => {
+    const live = await startServer(0, { liveEnabled: true });
+    try {
+      const experiment = localExperiment(target.url, [
+        latencyAction('https://api.globlex.pro', 250),
+      ]);
+      const res = await fetch(`http://127.0.0.1:${live.port}/api/v1/experiments/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ experiment, mode: 'live_probe' }),
+      });
+      assert.equal(res.status, 200);
+      const report = await res.json();
+      assert.equal(report.mode, 'live_probe');
+      assert.equal(report.status, 'failed');
+      assert.equal(report.injection.blocked, 1);
+      assert.equal(report.launchgate_report.recommendation, 'BLOCK');
+    } finally {
+      await new Promise((resolve) => live.server.close(resolve));
+    }
   });
 
   it('returns 404 for unknown experiment ID', async () => {

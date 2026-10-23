@@ -1,5 +1,7 @@
 export {
   ChaosRunner,
+  DEFAULT_MODE,
+  LiveModeDisabledError,
   loadExperiments,
   evaluateTolerance,
   computeResilienceScore,
